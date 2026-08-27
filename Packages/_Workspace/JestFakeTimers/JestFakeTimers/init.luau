@@ -26,6 +26,8 @@ local getType = require(Packages.JestGetType).getType
 
 local jestMock = require(Packages.JestMock).ModuleMocker
 
+local budgetedDefer = require(script.deferBudget)
+
 local realDelay = delay
 local realTick = tick
 local realTime = time
@@ -85,6 +87,7 @@ function FakeTimers.new(): FakeTimers
 	}
 	setmetatable(osOverride, { __index = realOs })
 	local taskOverride = {
+		defer = budgetedDefer,
 		delay = mock:fn(realTask.delay),
 		cancel = mock:fn(realTask.cancel),
 		wait = mock:fn(realTask.wait),
