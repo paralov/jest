@@ -144,26 +144,83 @@ local function expect_(_self, actual: any, ...)
 		error("Expect takes at most one argument.")
 	end
 
+	-- A typical test touches 1-2 of ~112 matchers per `expect()` call. The
+	-- eager loop built ~672 closures (6 variants × 112 matchers); ~99% were
+	-- discarded. `__index` builds and caches one closure only when accessed.
+	-- The shared `err` is preserved across all matchers on this expectation
+	-- so promise-matcher error identity is unchanged.
 	local allMatchers = getMatchers()
-	local expectation = {
-		never = {},
-		rejects = { never = {} },
-		resolves = { never = {} },
-	}
-
 	local err = JestAssertionError.new()
 
-	for name, matcher in pairs(allMatchers) do
+	local function buildSync(self_, name: string, isNot: boolean)
+		local matcher = allMatchers[name]
+		if matcher == nil then
+			return nil
+		end
+		local fn = makeThrowingMatcher(matcher, isNot, "", actual)
+		rawset(self_, name, fn)
+		return fn
+	end
+
+	local function buildResolves(self_, name: string, isNot: boolean)
+		local matcher = allMatchers[name]
+		if matcher == nil then
+			return nil
+		end
 		local ref = getPromiseMatcher(name, matcher)
 		local promiseMatcher = Boolean.toJSBoolean(ref) and ref or matcher
-		expectation[name] = makeThrowingMatcher(matcher, false, "", actual)
-		expectation.never[name] = makeThrowingMatcher(matcher, true, "", actual)
-
-		expectation.resolves[name] = makeResolveMatcher(name, promiseMatcher, false, actual, err)
-		expectation.resolves.never[name] = makeResolveMatcher(name, promiseMatcher, true, actual, err)
-		expectation.rejects[name] = makeRejectMatcher(name, promiseMatcher, false, actual, err)
-		expectation.rejects.never[name] = makeRejectMatcher(name, promiseMatcher, true, actual, err)
+		local fn = makeResolveMatcher(name, promiseMatcher, isNot, actual, err)
+		rawset(self_, name, fn)
+		return fn
 	end
+
+	local function buildRejects(self_, name: string, isNot: boolean)
+		local matcher = allMatchers[name]
+		if matcher == nil then
+			return nil
+		end
+		local ref = getPromiseMatcher(name, matcher)
+		local promiseMatcher = Boolean.toJSBoolean(ref) and ref or matcher
+		local fn = makeRejectMatcher(name, promiseMatcher, isNot, actual, err)
+		rawset(self_, name, fn)
+		return fn
+	end
+
+	local expectation = {
+		never = setmetatable({}, {
+			__index = function(t, name)
+				return buildSync(t, name, true)
+			end,
+		}),
+		resolves = setmetatable({
+			never = setmetatable({}, {
+				__index = function(t, name)
+					return buildResolves(t, name, true)
+				end,
+			}),
+		}, {
+			__index = function(t, name)
+				return buildResolves(t, name, false)
+			end,
+		}),
+		rejects = setmetatable({
+			never = setmetatable({}, {
+				__index = function(t, name)
+					return buildRejects(t, name, true)
+				end,
+			}),
+		}, {
+			__index = function(t, name)
+				return buildRejects(t, name, false)
+			end,
+		}),
+	}
+
+	setmetatable(expectation, {
+		__index = function(t, name)
+			return buildSync(t, name, false)
+		end,
+	})
 
 	return expectation
 end
