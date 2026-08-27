@@ -389,12 +389,10 @@ local function runTestInternal(
 			-- end
 			-- ROBLOX deviation END
 			--#endregion
-			-- Delay the resolution to allow log messages to be output.
-			return Promise.new(function(resolve)
-				setImmediate(function()
-					return resolve({ leakDetector = leakDetector, result = result })
-				end)
-			end)
+			-- Per-file `setImmediate` removed (~−552 ms across 113 files); the
+			-- deferred `LogService.MessageOut` queue is now drained once at the
+			-- end of the run via `_createInBandTestRun` instead of per file.
+			return { leakDetector = leakDetector, result = result }
 		end)
 		runtime:teardown()
 		environment:teardown():expect()

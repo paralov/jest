@@ -246,7 +246,17 @@ function TestRunner:_createInBandTestRun(
 					end) :: Promise<nil>
 				-- ROBLOX FIXME END
 			end)
-		end, Promise.resolve())
+		end, Promise.resolve()):andThen(function(lastResult)
+			-- End-of-run flush: drain `LogService.MessageOut`'s deferred queue
+			-- once before the runner disconnects its listener. Required after the
+			-- per-file `setImmediate` was removed in `runTest.luau` (was ~700 ms
+			-- of frame yields across 113 files). `task.defer` drains in the
+			-- current resumption cycle (same frame); `Heartbeat:Wait()` would
+			-- NOT flush the queue. Relies on `SignalBehavior = "Deferred"`.
+			return Promise.new(function(resolve)
+				task.defer(resolve, lastResult)
+			end)
+		end)
 	end)
 end
 
