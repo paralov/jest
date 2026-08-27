@@ -460,13 +460,6 @@ function Emittery:emit(eventName, eventData, allowMetaEvents)
 			then {}
 			else Array.concat({}, Array.from(anyListeners))
 
-		-- ROBLOX deviation START: need to delay a promise as awaited promises are deferred in JS
-		resolvedPromise
-			:andThen(function(...)
-				return Promise.delay(0):andThenReturn(...)
-			end)
-			:expect()
-		-- ROBLOX deviation END
 		Promise.all(Array.concat(
 			{},
 			Array.map(staticListeners, function(listener)
