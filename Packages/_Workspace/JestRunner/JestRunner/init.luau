@@ -9,7 +9,6 @@
 
 local Packages = script.Parent
 local LuauPolyfill = require(Packages.LuauPolyfill)
-local Array = LuauPolyfill.Array
 local Boolean = LuauPolyfill.Boolean
 local Error = LuauPolyfill.Error
 local Map = LuauPolyfill.Map
@@ -32,9 +31,6 @@ type Emittery_UnsubscribeFn = emitteryModule.Emittery_UnsubscribeFn
 
 -- ROBLOX deviation: exit used only in parallel tests
 -- local exit = require(Packages.exit)
-local throatModule = require(Packages.Throat)
-local throat = throatModule.default
-type ThroatLateBound<TResult, TArgs> = throatModule.ThroatLateBound<TResult, TArgs>
 local test_resultModule = require(Packages.JestTestResult)
 type SerializableError = test_resultModule.SerializableError
 type Context = test_resultModule.Context
@@ -122,6 +118,14 @@ export type TestRunner = {
 		onResult: OnTestSuccess?,
 		onFailure: OnTestFailure?
 	) -> Promise<nil>,
+	_runTestInBand: (
+		self: TestRunner,
+		test: Test,
+		watcher: TestWatcher,
+		onStart: OnTestStart?,
+		onResult: OnTestSuccess?,
+		onFailure: OnTestFailure?
+	) -> Promise<nil>,
 	_createParallelTestRun: (
 		self: TestRunner,
 		tests: Array<Test>,
@@ -173,91 +177,104 @@ function TestRunner:_createInBandTestRun(
 	return Promise.resolve():andThen(function()
 		-- ROBLOX deviation: no process available in Luau
 		-- process.env.JEST_WORKER_ID = "1"
-		local mutex = throat(1) :: ThroatLateBound<nil, nil>
-		return Array.reduce(tests, function(promise: Promise<nil>, test: Test)
-			return mutex(function()
-				-- ROBLOX FIXME START: Promise type doesn't support changing return type with :andThen call
-				return (promise :: Promise<any>)
-					:andThen(function(): Promise<TestResult>
-						return Promise.resolve():andThen(function()
-							if watcher:isInterrupted() then
-								error(CancelRun.new())
-							end
-							local sendMessageToJest
 
-							-- Remove `if(onStart)` in Jest 27: TestFileEvent
-							if onStart ~= nil then
-								onStart(test):expect()
-								return runTest(
-									-- ROBLOX deviation: using `script` instead of `path`
-									test.script,
-									self._globalConfig,
-									test.context.config,
-									-- ROBLOX deviation START: resolver no supported
-									nil,
-									-- test.context.resolver,
-									-- ROBLOX deviation END
-									self._context,
-									nil,
-									-- ROBLOX deviation START: add cache of loaded module functions to a test runner
-									self._loadedModuleFns
-									-- ROBLOX deviation END
-								)
-							else
-								-- `deepCyclicCopy` used here to avoid mem-leak
-								sendMessageToJest = function(eventName: string, args)
-									return self.eventEmitter:emit(
-										eventName,
-										deepCyclicCopy(args, { keepPrototype = false })
-									)
-								end
-								self.eventEmitter:emit("test-file-start", { test }):expect()
-								return runTest(
-									-- ROBLOX deviation: using `script` instead of `path`
-									test.script,
-									self._globalConfig,
-									test.context.config,
-									-- ROBLOX deviation START: resolver no supported
-									nil,
-									-- test.context.resolver,
-									-- ROBLOX deviation END
-									self._context,
-									sendMessageToJest,
-									-- ROBLOX deviation START: add cache of loaded module functions to a test runner
-									self._loadedModuleFns
-									-- ROBLOX deviation END
-								)
-							end
-						end)
-					end)
-					:andThen(function(result: TestResult)
-						if onResult ~= nil then
-							return onResult(test, result)
-						else
-							return self.eventEmitter:emit("test-file-success", { test :: any, result })
-						end
-					end)
-					:catch(function(err)
-						if onFailure ~= nil then
-							return onFailure(test, err)
-						else
-							return self.eventEmitter:emit("test-file-failure", { test :: any, err })
-						end
-					end) :: Promise<nil>
-				-- ROBLOX FIXME END
-			end)
-		end, Promise.resolve()):andThen(function(lastResult)
-			-- End-of-run flush: drain `LogService.MessageOut`'s deferred queue
-			-- once before the runner disconnects its listener. Required after the
-			-- per-file `setImmediate` was removed in `runTest.luau` (was ~700 ms
-			-- of frame yields across 113 files). `task.defer` drains in the
-			-- current resumption cycle (same frame); `Heartbeat:Wait()` would
-			-- NOT flush the queue. Relies on `SignalBehavior = "Deferred"`.
-			return Promise.new(function(resolve)
-				task.defer(resolve, lastResult)
-			end)
+		-- PARALOV deviation from upstream jest-lua: a plain loop, not `throat(1)`.
+		-- In the promise chain every later file was released from inside the
+		-- previous file's resolution, so each queued `andThen` hop was a nested
+		-- `coroutine.wrap` resume that only unwound at the end of the run. Luau's
+		-- C-call limit (200) trips after ~17 consecutive synchronous files with
+		-- `C stack overflow`. `:expect()` per file unwinds instead.
+		for _, test in tests do
+			self:_runTestInBand(test, watcher, onStart, onResult, onFailure):expect()
+		end
+
+		-- End-of-run flush: drain `LogService.MessageOut`'s deferred queue
+		-- once before the runner disconnects its listener. Required after the
+		-- per-file `setImmediate` was removed in `runTest.luau` (was ~700 ms
+		-- of frame yields across 113 files). `task.defer` drains in the
+		-- current resumption cycle (same frame); `Heartbeat:Wait()` would
+		-- NOT flush the queue. Relies on `SignalBehavior = "Deferred"`.
+		return Promise.new(function(resolve)
+			task.defer(resolve)
 		end)
 	end)
+end
+
+-- PARALOV deviation from upstream jest-lua: one file's run, lifted out of the
+-- `throat(1)` closure that `_createInBandTestRun` used to build it in.
+function TestRunner:_runTestInBand(
+	test: Test,
+	watcher: TestWatcher,
+	onStart: OnTestStart?,
+	onResult: OnTestSuccess?,
+	onFailure: OnTestFailure?
+): Promise<nil>
+	-- ROBLOX FIXME START: Promise type doesn't support changing return type with :andThen call
+	return Promise.resolve()
+		:andThen(function(): Promise<TestResult>
+			return Promise.resolve():andThen(function()
+				if watcher:isInterrupted() then
+					error(CancelRun.new())
+				end
+				local sendMessageToJest
+
+				-- Remove `if(onStart)` in Jest 27: TestFileEvent
+				if onStart ~= nil then
+					onStart(test):expect()
+					return runTest(
+						-- ROBLOX deviation: using `script` instead of `path`
+						test.script,
+						self._globalConfig,
+						test.context.config,
+						-- ROBLOX deviation START: resolver no supported
+						nil,
+						-- test.context.resolver,
+						-- ROBLOX deviation END
+						self._context,
+						nil,
+						-- ROBLOX deviation START: add cache of loaded module functions to a test runner
+						self._loadedModuleFns
+						-- ROBLOX deviation END
+					)
+				else
+					-- `deepCyclicCopy` used here to avoid mem-leak
+					sendMessageToJest = function(eventName: string, args)
+						return self.eventEmitter:emit(eventName, deepCyclicCopy(args, { keepPrototype = false }))
+					end
+					self.eventEmitter:emit("test-file-start", { test }):expect()
+					return runTest(
+						-- ROBLOX deviation: using `script` instead of `path`
+						test.script,
+						self._globalConfig,
+						test.context.config,
+						-- ROBLOX deviation START: resolver no supported
+						nil,
+						-- test.context.resolver,
+						-- ROBLOX deviation END
+						self._context,
+						sendMessageToJest,
+						-- ROBLOX deviation START: add cache of loaded module functions to a test runner
+						self._loadedModuleFns
+						-- ROBLOX deviation END
+					)
+				end
+			end)
+		end)
+		:andThen(function(result: TestResult)
+			if onResult ~= nil then
+				return onResult(test, result)
+			else
+				return self.eventEmitter:emit("test-file-success", { test :: any, result })
+			end
+		end)
+		:catch(function(err)
+			if onFailure ~= nil then
+				return onFailure(test, err)
+			else
+				return self.eventEmitter:emit("test-file-failure", { test :: any, err })
+			end
+		end) :: Promise<nil>
+	-- ROBLOX FIXME END
 end
 
 function TestRunner:_createParallelTestRun(
