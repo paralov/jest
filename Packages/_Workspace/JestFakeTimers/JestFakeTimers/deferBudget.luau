@@ -19,10 +19,7 @@ local realTask = task
 local BUDGET_PER_FRAME = 70
 
 local deferredThisFrame = 0
-
-RunService.Heartbeat:Connect(function()
-	deferredThisFrame = 0
-end)
+local resetConnection: RBXScriptConnection? = nil
 
 --[[
 	`task.defer` for the environment Jest gives the code under test. Over budget,
@@ -35,6 +32,18 @@ end)
 local function budgetedDefer(...)
 	if deferredThisFrame >= BUDGET_PER_FRAME then
 		return realTask.delay(0, ...)
+	end
+
+	-- `:Once`, so the reset closes its own connection: this module has no
+	-- teardown hook to disconnect from, and a frame that spends no budget needs
+	-- no reset. Heartbeat is the only frame signal available -- `time()` and
+	-- `DistributedGameTime` both stay at zero while the runner's DataModel is
+	-- not running.
+	if resetConnection == nil then
+		resetConnection = RunService.Heartbeat:Once(function()
+			deferredThisFrame = 0
+			resetConnection = nil
+		end)
 	end
 
 	deferredThisFrame += 1
